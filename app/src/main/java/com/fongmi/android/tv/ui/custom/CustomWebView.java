@@ -1,29 +1,36 @@
 package com.fongmi.android.tv.ui.custom;
 
 import android.annotation.SuppressLint;
-import android.app.AlertDialog;
 import android.content.Context;
+import android.content.DialogInterface;
 import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.net.Uri;
-import android.net.http.SslError;
 import android.text.TextUtils;
 import android.view.ViewGroup;
-import android.webkit.CookieManager;
-import android.webkit.SslErrorHandler;
-import android.webkit.WebResourceRequest;
-import android.webkit.WebResourceResponse;
 import android.webkit.WebSettings;
-import android.webkit.WebView;
-import android.webkit.WebViewClient;
+import com.fongmi.android.tv.utils.Notify;
+import com.tencent.smtt.export.external.interfaces.SslError;
+import com.tencent.smtt.export.external.interfaces.SslErrorHandler;
+import com.tencent.smtt.export.external.interfaces.WebResourceRequest;
+import com.tencent.smtt.export.external.interfaces.WebResourceResponse;
+import com.tencent.smtt.sdk.CookieManager;
+import com.tencent.smtt.sdk.QbSdk;
+import com.tencent.smtt.sdk.WebChromeClient;
+import com.tencent.smtt.sdk.WebView;
+import com.tencent.smtt.sdk.WebViewClient;
 
 import androidx.annotation.NonNull;
 
 import com.fongmi.android.tv.App;
 import com.fongmi.android.tv.Constant;
+import com.fongmi.android.tv.R;
 import com.fongmi.android.tv.Setting;
+import com.fongmi.android.tv.api.config.LiveConfig;
 import com.fongmi.android.tv.api.config.VodConfig;
 import com.fongmi.android.tv.bean.Site;
 import com.fongmi.android.tv.impl.ParseCallback;
+import com.fongmi.android.tv.ui.dialog.WebDialog;
 import com.fongmi.android.tv.utils.Sniffer;
 import com.github.catvod.crawler.Spider;
 import com.google.common.net.HttpHeaders;
@@ -33,15 +40,16 @@ import java.io.ByteArrayInputStream;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.regex.Pattern;
 
-public class CustomWebView extends WebView {
+public class CustomWebView extends WebView implements DialogInterface.OnDismissListener {
 
     private static final String TAG = CustomWebView.class.getSimpleName();
     private static final String BLANK = "about:blank";
 
     private WebResourceResponse empty;
     private ParseCallback callback;
-    private AlertDialog dialog;
+    private WebDialog dialog;
     private Runnable timer;
     private boolean detect;
     private String click;
@@ -49,12 +57,23 @@ public class CustomWebView extends WebView {
     private String key;
 
     public static CustomWebView create(@NonNull Context context) {
+        initTbs();
         return new CustomWebView(context);
     }
 
     public CustomWebView(@NonNull Context context) {
         super(context);
         initSettings();
+        showTbs();
+    }
+
+    private static void initTbs() {
+        if (Setting.getParseWebView() == 0) QbSdk.forceSysWebView();
+        else QbSdk.unForceSysWebView();
+    }
+
+    private void showTbs() {
+        if (this.getIsX5Core())  Notify.show(R.string.x5webview_parsing);
     }
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -64,6 +83,7 @@ public class CustomWebView extends WebView {
         getSettings().setSupportZoom(true);
         getSettings().setUseWideViewPort(true);
         getSettings().setDatabaseEnabled(true);
+        getSettings().setBlockNetworkImage(true);
         getSettings().setDomStorageEnabled(true);
         getSettings().setJavaScriptEnabled(true);
         getSettings().setBuiltInZoomControls(true);
@@ -73,8 +93,8 @@ public class CustomWebView extends WebView {
         getSettings().setMediaPlaybackRequiresUserGesture(false);
         getSettings().setJavaScriptCanOpenWindowsAutomatically(false);
         getSettings().setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
-        CookieManager.getInstance().setAcceptThirdPartyCookies(this, true);
         setWebViewClient(webViewClient());
+        setWebChromeClient(webChromeClient());
     }
 
     public CustomWebView start(String key, String from, Map<String, String> headers, String url, String click, ParseCallback callback, boolean detect) {
@@ -89,14 +109,14 @@ public class CustomWebView extends WebView {
     }
 
     private void start(String url, Map<String, String> headers) {
+        CookieManager.getInstance().setAcceptThirdPartyCookies(this, true);
         checkHeader(url, headers);
         loadUrl(url, headers);
     }
 
     private void checkHeader(String url, Map<String, String> headers) {
         for (String key : headers.keySet()) {
-            if (key.equalsIgnoreCase(HttpHeaders.COOKIE)) CookieManager.getInstance().setCookie(url, headers.get(key));
-            if (key.equalsIgnoreCase(HttpHeaders.USER_AGENT)) getSettings().setUserAgentString(headers.get(key));
+            if (HttpHeaders.USER_AGENT.equalsIgnoreCase(key)) getSettings().setUserAgentString(headers.get(key));
         }
     }
 
@@ -106,18 +126,12 @@ public class CustomWebView extends WebView {
             public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
                 String url = request.getUrl().toString();
                 String host = request.getUrl().getHost();
+                if (TextUtils.isEmpty(host) || isAd(host)) return empty;
                 Map<String, String> headers = request.getRequestHeaders();
-                if (TextUtils.isEmpty(host) || VodConfig.get().getAds().contains(host)) return empty;
-                if (url.contains("challenges.cloudflare.com/cdn-cgi")) App.post(() -> showDialog());
+                if (url.contains("challenges.cloudflare.com/turnstile")) App.post(() -> showDialog());
                 if (detect && url.contains("player/?url=")) onParseAdd(headers, url);
-                else if (isVideoFormat(url)) interrupt(headers, url);
+                else if (isVideoFormat(url)) onParseSuccess(headers, url);
                 return super.shouldInterceptRequest(view, request);
-            }
-
-            @Override
-            public void onPageStarted(WebView view, String url, Bitmap favicon) {
-                super.onPageStarted(view, url, favicon);
-                if (dialog != null) hideDialog();
             }
 
             @Override
@@ -140,15 +154,34 @@ public class CustomWebView extends WebView {
         };
     }
 
+    private WebChromeClient webChromeClient() {
+        return new WebChromeClient() {
+            @Override
+            public Bitmap getDefaultVideoPoster() {
+                try {
+                    return BitmapFactory.decodeResource(App.get().getResources(), R.drawable.ic_logo);
+                } catch (Throwable e) {
+                    return super.getDefaultVideoPoster();
+                }
+            }
+        };
+    }
+
     private void showDialog() {
         if (dialog != null || App.activity() == null) return;
         if (getParent() != null) ((ViewGroup) getParent()).removeView(this);
-        dialog = new AlertDialog.Builder(App.activity()).setView(this).show();
+        dialog = new WebDialog(this).show();
+        App.removeCallbacks(timer);
     }
 
     private void hideDialog() {
         if (dialog != null) dialog.dismiss();
         dialog = null;
+    }
+
+    @Override
+    public void onDismiss(DialogInterface dialog) {
+        stop(true);
     }
 
     private List<String> getScript(String url) {
@@ -167,6 +200,14 @@ public class CustomWebView extends WebView {
         }
     }
 
+    private boolean isAd(String host) {
+        for (String ad : VodConfig.get().getAds()) if (host.contains(ad)) return true;
+        for (String ad : LiveConfig.get().getAds()) if (host.contains(ad)) return true;
+        for (String ad : VodConfig.get().getAds()) if (Pattern.compile(ad).matcher(host).find()) return true;
+        for (String ad : LiveConfig.get().getAds()) if (Pattern.compile(ad).matcher(host).find()) return true;
+        return false;
+    }
+
     private boolean isVideoFormat(String url) {
         try {
             Logger.t(TAG).d(url);
@@ -177,12 +218,6 @@ public class CustomWebView extends WebView {
         } catch (Exception ignored) {
             return Sniffer.isVideoFormat(url);
         }
-    }
-
-    private void interrupt(Map<String, String> headers, String url) {
-        String cookie = CookieManager.getInstance().getCookie(url);
-        if (cookie != null) headers.put(HttpHeaders.COOKIE, cookie);
-        onParseSuccess(headers, url);
     }
 
     private void onParseAdd(Map<String, String> headers, String url) {

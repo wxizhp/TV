@@ -1,22 +1,18 @@
 package com.fongmi.android.tv.server;
 
-import android.util.Base64;
-
 import com.fongmi.android.tv.api.config.LiveConfig;
 import com.fongmi.android.tv.api.config.VodConfig;
 import com.fongmi.android.tv.bean.Device;
 import com.fongmi.android.tv.server.process.Action;
 import com.fongmi.android.tv.server.process.Cache;
 import com.fongmi.android.tv.server.process.Local;
+import com.fongmi.android.tv.server.process.Media;
 import com.fongmi.android.tv.server.process.Process;
-import com.fongmi.android.tv.utils.M3U8;
 import com.github.catvod.utils.Asset;
+import com.github.catvod.utils.Util;
 import com.google.common.net.HttpHeaders;
 
-import java.io.ByteArrayInputStream;
-import java.io.IOException;
 import java.io.InputStream;
-import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -40,6 +36,7 @@ public class Nano extends NanoHTTPD {
         process.add(new Action());
         process.add(new Cache());
         process.add(new Local());
+        process.add(new Media());
     }
 
     public static Response success() {
@@ -72,11 +69,10 @@ public class Nano extends NanoHTTPD {
         if (session.getMethod() == Method.POST) parse(session, files);
         if (url.contains("?")) url = url.substring(0, url.indexOf('?'));
         if (url.startsWith("/go")) return go();
-        if (url.startsWith("/m3u8")) return m3u8(session);
         if (url.startsWith("/proxy")) return proxy(session);
         if (url.startsWith("/tvbus")) return success(LiveConfig.getResp());
         if (url.startsWith("/device")) return success(Device.get().toString());
-        if (url.startsWith("/license")) return success(new String(Base64.decode(url.substring(9), Base64.DEFAULT)));
+        if (url.startsWith("/license")) return success(new String(Util.decode(url.substring(9), Util.URL_SAFE)));
         for (Process process : process) if (process.isRequest(session, url)) return process.doResponse(session, url, files);
         return getAssets(url.substring(1));
     }
@@ -99,19 +95,15 @@ public class Nano extends NanoHTTPD {
         return success();
     }
 
-    private Response m3u8(IHTTPSession session) {
-        String url = session.getParms().get("url");
-        String result = M3U8.get(url, session.getHeaders());
-        if (result.isEmpty()) return redirect(url, session.getHeaders());
-        return newChunkedResponse(Response.Status.OK, MIME_PLAINTEXT, new ByteArrayInputStream(result.getBytes(StandardCharsets.UTF_8)));
-    }
-
     private Response proxy(IHTTPSession session) {
         try {
             Map<String, String> params = session.getParms();
             params.putAll(session.getHeaders());
             Object[] rs = VodConfig.get().proxyLocal(params);
-            return rs[0] instanceof Response ? (Response) rs[0] : newChunkedResponse(Response.Status.lookup((Integer) rs[0]), (String) rs[1], (InputStream) rs[2]);
+            if (rs[0] instanceof Response) return (Response) rs[0];
+            Response response = newChunkedResponse(Response.Status.lookup((Integer) rs[0]), (String) rs[1], (InputStream) rs[2]);
+            if (rs.length > 3 && rs[3] != null) for (Map.Entry<String, String> entry : ((Map<String, String>) rs[3]).entrySet()) response.addHeader(entry.getKey(), entry.getValue());
+            return response;
         } catch (Exception e) {
             return error(e.getMessage());
         }
@@ -122,7 +114,7 @@ public class Nano extends NanoHTTPD {
             if (path.isEmpty()) path = "index.html";
             InputStream is = Asset.open(path);
             return newFixedLengthResponse(Response.Status.OK, getMimeTypeForFile(path), is, is.available());
-        } catch (IOException e) {
+        } catch (Exception e) {
             return newFixedLengthResponse(Response.Status.NOT_FOUND, MIME_HTML, null);
         }
     }

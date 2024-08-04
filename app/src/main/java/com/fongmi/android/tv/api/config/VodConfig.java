@@ -41,6 +41,7 @@ public class VodConfig {
     private List<Site> sites;
     private List<Parse> parses;
     private List<String> flags;
+    private List<String> ads;
     private JarLoader jarLoader;
     private PyLoader pyLoader;
     private JsLoader jsLoader;
@@ -48,7 +49,6 @@ public class VodConfig {
     private Config config;
     private Parse parse;
     private String wall;
-    private String ads;
     private Site home;
 
     private static class Loader {
@@ -75,8 +75,12 @@ public class VodConfig {
         return get().getSites().indexOf(get().getHome());
     }
 
+    public static boolean hasUrl() {
+        return getUrl() != null && getUrl().length() > 0;
+    }
+
     public static boolean hasParse() {
-        return get().getParses().size() > 0;
+        return !get().getParses().isEmpty();
     }
 
     public static void load(Config config, Callback callback) {
@@ -84,11 +88,11 @@ public class VodConfig {
     }
 
     public VodConfig init() {
-        this.ads = null;
         this.wall = null;
         this.home = null;
         this.parse = null;
         this.config = Config.vod();
+        this.ads = new ArrayList<>();
         this.doh = new ArrayList<>();
         this.rules = new ArrayList<>();
         this.sites = new ArrayList<>();
@@ -107,10 +111,10 @@ public class VodConfig {
     }
 
     public VodConfig clear() {
-        this.ads = null;
         this.wall = null;
         this.home = null;
         this.parse = null;
+        this.ads.clear();
         this.doh.clear();
         this.rules.clear();
         this.sites.clear();
@@ -124,7 +128,12 @@ public class VodConfig {
     }
 
     public void load(Callback callback) {
-        App.execute(() -> loadConfig(callback));
+        load(callback, false);
+    }
+
+    public void load(Callback callback, boolean cache) {
+        if (cache) App.execute(() -> loadConfigCache(callback));
+        else App.execute(() -> loadConfig(callback));
     }
 
     private void loadConfig(Callback callback) {
@@ -142,8 +151,15 @@ public class VodConfig {
         else App.post(() -> callback.error(Notify.getError(R.string.error_config_get, e)));
     }
 
+    private void loadConfigCache(Callback callback) {
+        if (!TextUtils.isEmpty(config.getJson()) && config.isCache()) checkJson(Json.parse(config.getJson()).getAsJsonObject(), callback);
+        else loadConfig(callback);
+    }
+
     private void checkJson(JsonObject object, Callback callback) {
-        if (object.has("urls")) {
+        if (object.has("msg") && callback != null) {
+            App.post(() -> callback.error(object.get("msg").getAsString()));
+        } else if (object.has("urls")) {
             parseDepot(object, callback);
         } else {
             parseConfig(object, callback);
@@ -166,6 +182,7 @@ public class VodConfig {
             initOther(object);
             if (loadLive && object.has("lives")) initLive(object);
             jarLoader.parseJar("", Json.safeString(object, "spider"));
+            config.logo(Json.safeString(object, "logo"));
             config.json(object.toString()).update();
             App.post(callback::success);
         } catch (Throwable e) {
@@ -184,7 +201,7 @@ public class VodConfig {
             if (sites.contains(site)) continue;
             site.setApi(parseApi(site.getApi()));
             site.setExt(parseExt(site.getExt()));
-            sites.add(site.sync());
+            sites.add(site.trans().sync());
         }
         for (Site site : sites) {
             if (site.getKey().equals(config.getHome())) {
@@ -219,12 +236,12 @@ public class VodConfig {
     }
 
     private String parseApi(String api) {
-        if (api.startsWith("file") || api.startsWith("assets")) return UrlUtil.convert(api);
+        if (api.startsWith("file") || api.startsWith("clan") || api.startsWith("assets")) return UrlUtil.convert(api);
         return api;
     }
 
     private String parseExt(String ext) {
-        if (ext.startsWith("file") || ext.startsWith("assets")) return UrlUtil.convert(ext);
+        if (ext.startsWith("file") || ext.startsWith("clan") || ext.startsWith("assets")) return UrlUtil.convert(ext);
         if (ext.startsWith("img+")) return Decoder.getExt(ext);
         return ext;
     }
@@ -255,9 +272,9 @@ public class VodConfig {
     }
 
     public Object[] proxyLocal(Map<String, String> params) {
-        if (params.containsKey("do") && params.get("do").equals("js")) {
+        if ("js".equals(params.get("do"))) {
             return jsLoader.proxyInvoke(params);
-        } else if (params.containsKey("do") && params.get("do").equals("py")) {
+        } else if ("py".equals(params.get("do"))) {
             return pyLoader.proxyInvoke(params);
         } else {
             return jarLoader.proxyInvoke(params);
@@ -289,7 +306,7 @@ public class VodConfig {
     }
 
     public void setRules(List<Rule> rules) {
-        for (Rule rule : rules) if ("proxy".equals(rule.getName())) OkHttp.selector().setHosts(rule.getHosts());
+        for (Rule rule : rules) if ("proxy".equals(rule.getName())) OkHttp.selector().addAll(rule.getHosts());
         rules.remove(Rule.create("proxy"));
         this.rules = rules;
     }
@@ -310,7 +327,7 @@ public class VodConfig {
 
     public List<Parse> getParses(int type, String flag) {
         List<Parse> items = new ArrayList<>();
-        for (Parse item : getParses(type)) if (item.getExt().getFlag().contains(flag)) items.add(item);
+        for (Parse item : getParses(type)) if (item.getExt().getFlag().isEmpty() || item.getExt().getFlag().contains(flag)) items.add(item);
         if (items.isEmpty()) items.addAll(getParses(type));
         return items;
     }
@@ -323,12 +340,12 @@ public class VodConfig {
         this.flags.addAll(flags);
     }
 
-    public String getAds() {
-        return TextUtils.isEmpty(ads) ? "" : ads;
+    public List<String> getAds() {
+        return ads == null ? Collections.emptyList() : ads;
     }
 
     private void setAds(List<String> ads) {
-        this.ads = TextUtils.join(",", ads);
+        this.ads = ads;
     }
 
     public Config getConfig() {

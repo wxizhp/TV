@@ -7,7 +7,9 @@ import android.view.View;
 
 import androidx.viewbinding.ViewBinding;
 
+import com.fongmi.android.tv.App;
 import com.fongmi.android.tv.BuildConfig;
+import com.fongmi.android.tv.R;
 import com.fongmi.android.tv.Setting;
 import com.fongmi.android.tv.Updater;
 import com.fongmi.android.tv.api.config.LiveConfig;
@@ -19,14 +21,16 @@ import com.fongmi.android.tv.bean.Site;
 import com.fongmi.android.tv.databinding.ActivitySettingBinding;
 import com.fongmi.android.tv.db.AppDatabase;
 import com.fongmi.android.tv.event.RefreshEvent;
+import com.fongmi.android.tv.impl.BackupCallback;
 import com.fongmi.android.tv.impl.Callback;
 import com.fongmi.android.tv.impl.ConfigCallback;
 import com.fongmi.android.tv.impl.DohCallback;
 import com.fongmi.android.tv.impl.LiveCallback;
 import com.fongmi.android.tv.impl.ProxyCallback;
 import com.fongmi.android.tv.impl.SiteCallback;
-import com.fongmi.android.tv.player.ExoUtil;
+import com.fongmi.android.tv.player.Source;
 import com.fongmi.android.tv.ui.base.BaseActivity;
+import com.fongmi.android.tv.ui.dialog.BackupDialog;
 import com.fongmi.android.tv.ui.dialog.ConfigDialog;
 import com.fongmi.android.tv.ui.dialog.DohDialog;
 import com.fongmi.android.tv.ui.dialog.HistoryDialog;
@@ -35,17 +39,23 @@ import com.fongmi.android.tv.ui.dialog.ProxyDialog;
 import com.fongmi.android.tv.ui.dialog.SiteDialog;
 import com.fongmi.android.tv.utils.FileUtil;
 import com.fongmi.android.tv.utils.Notify;
+import com.fongmi.android.tv.utils.ResUtil;
 import com.fongmi.android.tv.utils.UrlUtil;
 import com.github.catvod.bean.Doh;
 import com.github.catvod.net.OkHttp;
 import com.permissionx.guolindev.PermissionX;
 
+import org.greenrobot.eventbus.Subscribe;
+import org.greenrobot.eventbus.ThreadMode;
+
+import java.io.File;
 import java.util.ArrayList;
 import java.util.List;
 
-public class SettingActivity extends BaseActivity implements ConfigCallback, SiteCallback, LiveCallback, DohCallback, ProxyCallback {
+public class SettingActivity extends BaseActivity implements BackupCallback, ConfigCallback, SiteCallback, LiveCallback, DohCallback, ProxyCallback {
 
     private ActivitySettingBinding mBinding;
+    private String[] backup;
     private int type;
 
     public static void start(Activity activity) {
@@ -73,10 +83,11 @@ public class SettingActivity extends BaseActivity implements ConfigCallback, Sit
         mBinding.vodUrl.setText(VodConfig.getDesc());
         mBinding.liveUrl.setText(LiveConfig.getDesc());
         mBinding.wallUrl.setText(WallConfig.getDesc());
-        mBinding.backupText.setText(AppDatabase.getDate());
         mBinding.dohText.setText(getDohList()[getDohIndex()]);
         mBinding.versionText.setText(BuildConfig.VERSION_NAME);
         mBinding.proxyText.setText(UrlUtil.scheme(Setting.getProxy()));
+        mBinding.backupText.setText((backup = ResUtil.getStringArray(R.array.select_backup))[Setting.getBackupMode()]);
+        mBinding.aboutText.setText(BuildConfig.FLAVOR_mode + "-" + BuildConfig.FLAVOR_api + "-" + BuildConfig.FLAVOR_abi);
         setCacheText();
     }
 
@@ -96,7 +107,9 @@ public class SettingActivity extends BaseActivity implements ConfigCallback, Sit
         mBinding.wall.setOnClickListener(this::onWall);
         mBinding.proxy.setOnClickListener(this::onProxy);
         mBinding.cache.setOnClickListener(this::onCache);
+        mBinding.cache.setOnLongClickListener(this::onCacheLongClick);
         mBinding.backup.setOnClickListener(this::onBackup);
+        mBinding.restore.setOnClickListener(this::onRestore);
         mBinding.player.setOnClickListener(this::onPlayer);
         mBinding.danmu.setOnClickListener(this::onDanmu);
         mBinding.version.setOnClickListener(this::onVersion);
@@ -105,7 +118,7 @@ public class SettingActivity extends BaseActivity implements ConfigCallback, Sit
         mBinding.live.setOnLongClickListener(this::onLiveEdit);
         mBinding.liveHome.setOnClickListener(this::onLiveHome);
         mBinding.wall.setOnLongClickListener(this::onWallEdit);
-        mBinding.backup.setOnLongClickListener(this::onBackupAuto);
+        mBinding.backup.setOnLongClickListener(this::onBackupMode);
         mBinding.vodHistory.setOnClickListener(this::onVodHistory);
         mBinding.version.setOnLongClickListener(this::onVersionDev);
         mBinding.liveHistory.setOnClickListener(this::onLiveHistory);
@@ -113,6 +126,7 @@ public class SettingActivity extends BaseActivity implements ConfigCallback, Sit
         mBinding.wallRefresh.setOnClickListener(this::setWallRefresh);
         mBinding.custom.setOnClickListener(this::onCustom);
         mBinding.doh.setOnClickListener(this::setDoh);
+        mBinding.about.setOnClickListener(this::onAbout);
     }
 
     @Override
@@ -162,23 +176,18 @@ public class SettingActivity extends BaseActivity implements ConfigCallback, Sit
     private void setConfig() {
         switch (type) {
             case 0:
-                setCacheText();
                 Notify.dismiss();
-                RefreshEvent.video();
                 RefreshEvent.history();
-                mBinding.vodUrl.setText(VodConfig.getDesc());
-                mBinding.liveUrl.setText(LiveConfig.getDesc());
-                mBinding.wallUrl.setText(WallConfig.getDesc());
+                RefreshEvent.config();
+                RefreshEvent.video();
                 break;
             case 1:
-                setCacheText();
                 Notify.dismiss();
-                mBinding.liveUrl.setText(LiveConfig.getDesc());
+                RefreshEvent.config();
                 break;
             case 2:
-                setCacheText();
                 Notify.dismiss();
-                mBinding.wallUrl.setText(WallConfig.getDesc());
+                RefreshEvent.config();
                 break;
         }
     }
@@ -277,12 +286,17 @@ public class SettingActivity extends BaseActivity implements ConfigCallback, Sit
         SettingCustomActivity.start(this);
     }
 
+    private void onAbout(View view) {
+        mBinding.aboutText.setText(BuildConfig.FLAVOR_mode + "-" + BuildConfig.FLAVOR_api + "-" + BuildConfig.FLAVOR_abi);
+    }
+
     private void setDoh(View view) {
         DohDialog.create(this).index(getDohIndex()).show();
     }
 
     @Override
     public void setDoh(Doh doh) {
+        Source.get().stop();
         OkHttp.get().setDoh(doh);
         Notify.progress(getActivity());
         Setting.putDoh(doh.toString());
@@ -296,8 +310,9 @@ public class SettingActivity extends BaseActivity implements ConfigCallback, Sit
 
     @Override
     public void setProxy(String proxy) {
-        ExoUtil.reset();
+        Source.get().stop();
         Setting.putProxy(proxy);
+        OkHttp.selector().clear();
         OkHttp.get().setProxy(proxy);
         Notify.progress(getActivity());
         VodConfig.load(Config.vod(), getCallback());
@@ -308,23 +323,84 @@ public class SettingActivity extends BaseActivity implements ConfigCallback, Sit
         FileUtil.clearCache(new Callback() {
             @Override
             public void success() {
+                VodConfig.get().getConfig().json("").save();
                 setCacheText();
             }
         });
     }
 
-    private void onBackup(View view) {
-        PermissionX.init(this).permissions(Manifest.permission.WRITE_EXTERNAL_STORAGE).request((allGranted, grantedList, deniedList) -> AppDatabase.backup(new Callback() {
+    private boolean onCacheLongClick(View view) {
+        FileUtil.clearCache(new Callback() {
             @Override
             public void success() {
-                mBinding.backupText.setText(AppDatabase.getDate());
+                setCacheText();
+                Config config = VodConfig.get().getConfig().json("").save();
+                if (!config.isEmpty()) setConfig(config);
+            }
+        });
+        return true;
+    }
+
+    @Override
+    public void restore(File file) {
+        PermissionX.init(this).permissions(Manifest.permission.WRITE_EXTERNAL_STORAGE).request((allGranted, grantedList, deniedList) -> AppDatabase.restore(file, new Callback() {
+            @Override
+            public void success() {
+                if (allGranted) {
+                    Notify.progress(getActivity());
+                    App.post(() -> {
+                        AppDatabase.reset();
+                        initConfig();
+                    }, 3000);
+                }
             }
         }));
     }
 
-    private boolean onBackupAuto(View view) {
-        Setting.putBackupAuto(!Setting.isBackupAuto());
-        mBinding.backupText.setText(AppDatabase.getDate());
+    private void onRestore(View view) {
+        PermissionX.init(this).permissions(Manifest.permission.WRITE_EXTERNAL_STORAGE).request((allGranted, grantedList, deniedList) -> {
+            if (allGranted) BackupDialog.create(this).show();
+        });
+    }
+
+    private void initConfig() {
+        WallConfig.get().init();
+        LiveConfig.get().init().load();
+        VodConfig.get().init().load(getCallback());
+    }
+
+    private void onBackup(View view) {
+        PermissionX.init(this).permissions(Manifest.permission.WRITE_EXTERNAL_STORAGE).request((allGranted, grantedList, deniedList) -> AppDatabase.backup(new Callback() {
+            @Override
+            public void success(String path) {
+                Notify.show(R.string.backed);
+            }
+        }));
+    }
+
+    private boolean onBackupMode(View view) {
+        int index = Setting.getBackupMode();
+        Setting.putBackupMode(index = index == backup.length - 1 ? 0 : ++index);
+        mBinding.backupText.setText(backup[index]);
         return true;
+    }
+
+    @Subscribe(threadMode = ThreadMode.MAIN)
+    public void onRefreshEvent(RefreshEvent event) {
+        super.onRefreshEvent(event);
+        switch (event.getType()) {
+            case CONFIG:
+                setCacheText();
+                mBinding.vodUrl.setText(VodConfig.getDesc());
+                mBinding.liveUrl.setText(LiveConfig.getDesc());
+                mBinding.wallUrl.setText(WallConfig.getDesc());
+                break;
+        }
+    }
+
+    @Override
+    protected void onDestroy() {
+        super.onDestroy();
+        RefreshEvent.history();
     }
 }

@@ -36,7 +36,7 @@ public class JarLoader {
     }
 
     public void clear() {
-        for (Spider spider : spiders.values()) spider.destroy();
+        for (Spider spider : spiders.values()) App.execute(spider::destroy);
         loaders.clear();
         methods.clear();
         spiders.clear();
@@ -94,6 +94,8 @@ public class JarLoader {
         } else if (jar.startsWith("file")) {
             load(key, Path.local(jar));
         } else if (jar.startsWith("assets")) {
+            parseJar(key, UrlUtil.convert(jar));
+        } else if (!jar.isEmpty()) {
             parseJar(key, UrlUtil.convert(jar));
         }
     }
